@@ -85,7 +85,8 @@ public class ThirdPersonHandsClient implements ClientModInitializer {
     private double projectileBoxSize = 0.5;  // size of each predicted box, in blocks
     private double minProjectileSpeed = 1.0; // ignore entities slower than this (blocks/second)
     private Set<String> projectileTypes = new HashSet<>(); // empty = all entity types
-    private boolean showZones = false;       // floor squares showing unsafe (and optionally safe) places to stand
+    private boolean showPaths = true;        // line from each projectile to its predicted box
+    private boolean showZones = false;      // floor squares showing unsafe (and optionally safe) places to stand
     private boolean showSafeCells = false;   // also draw green squares on safe cells
     private double zoneRadius = 5.0;         // how far around you the zone map reaches, in blocks
     private int zoneLookaheadMs = 200;       // how far past your ping to look for incoming hits
@@ -259,6 +260,10 @@ public class ThirdPersonHandsClient implements ClientModInitializer {
                 AABB pb = new AABB(pred.x - h, pred.y - h, pred.z - h, pred.x + h, pred.y + h, pred.z + h);
                 boolean danger = pb.intersects(myBox);
                 Gizmos.cuboid(pb, GizmoStyle.stroke(danger ? 0xFFFF2020 : 0xFFFFC030));
+                if (showPaths) {
+                    // Line from where the projectile is on your screen to where it will be.
+                    Gizmos.line(pos, pred, danger ? 0xFFFF2020 : 0xA0FFC030);
+                }
                 drawn++;
             }
         }
@@ -497,6 +502,7 @@ public class ThirdPersonHandsClient implements ClientModInitializer {
             toggle(left, y0 + row * 7, "Entity debug", () -> m.debugEntities, v -> m.debugEntities = v);
             toggle(left, y0 + row * 8, "Danger zones", () -> m.showZones, v -> m.showZones = v);
             toggle(left, y0 + row * 9, "Show safe cells", () -> m.showSafeCells, v -> m.showSafeCells = v);
+            toggle(left, y0 + row * 10, "Path lines", () -> m.showPaths, v -> m.showPaths = v);
 
             // Right column: numbers
             stepper(right, y0 + row * 0, "Extra delay", " ms", 5, -200, 400, 0,
@@ -623,6 +629,7 @@ public class ThirdPersonHandsClient implements ClientModInitializer {
             d.setProperty("projectileBoxSize", String.valueOf(projectileBoxSize));
             d.setProperty("minProjectileSpeed", String.valueOf(minProjectileSpeed));
             d.setProperty("projectileTypes", String.join(",", projectileTypes));
+            d.setProperty("showPaths", String.valueOf(showPaths));
             d.setProperty("showZones", String.valueOf(showZones));
             d.setProperty("showSafeCells", String.valueOf(showSafeCells));
             d.setProperty("zoneRadius", String.valueOf(zoneRadius));
@@ -665,6 +672,7 @@ public class ThirdPersonHandsClient implements ClientModInitializer {
             projectileBoxSize = Double.parseDouble(p.getProperty("projectileBoxSize", "0.5").trim());
             minProjectileSpeed = Double.parseDouble(p.getProperty("minProjectileSpeed", "1.0").trim());
             debugEntities = Boolean.parseBoolean(p.getProperty("debugEntities", "false").trim());
+            showPaths = Boolean.parseBoolean(p.getProperty("showPaths", "true").trim());
             showZones = Boolean.parseBoolean(p.getProperty("showZones", "false").trim());
             showSafeCells = Boolean.parseBoolean(p.getProperty("showSafeCells", "false").trim());
             zoneRadius = Double.parseDouble(p.getProperty("zoneRadius", "5.0").trim());
