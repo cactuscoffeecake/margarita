@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "id": "thirdperson_hands",
+  "version": "${version}",
+  "name": "Third Person Hands",
+  "description": "Keeps your first-person hands and held items visible while in third person.",
+  "authors": ["you"],
+  "license": "MIT",
+  "environment": "client",
+  "entrypoints": {
+    "client": ["com.example.thirdpersonhands.ThirdPersonHandsClient"]
+  },
+  "mixins": ["thirdperson_hands.mixins.json"],
+  "depends": {
+    "fabricloader": ">=0.19.3",
+    "minecraft": "~26.3",
+    "java": ">=25"
+  }
+}
