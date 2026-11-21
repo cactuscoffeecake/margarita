@@ -6,7 +6,9 @@ import java.io.OutputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayDeque;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.HashSet;
 import java.util.Map;
 import java.util.Properties;
@@ -83,7 +85,11 @@ public class ThirdPersonHandsClient implements ClientModInitializer {
     private double projectileBoxSize = 0.5;  // size of each predicted box, in blocks
     private double minProjectileSpeed = 1.0; // ignore entities slower than this (blocks/second)
     private Set<String> projectileTypes = new HashSet<>(); // empty = all entity types
-    private boolean straightOnly = true;     // skip things that speed up/slow down/bounce (coins, falling items)
+    private boolean showZones = false;       // floor squares showing unsafe (and optionally safe) places to stand
+    private boolean showSafeCells = false;   // also draw green squares on safe cells
+    private double zoneRadius = 5.0;         // how far around you the zone map reaches, in blocks
+    private int zoneLookaheadMs = 200;       // how far past your ping to look for incoming hits
+    private boolean straightOnly = true;    // skip things that speed up/slow down/bounce (coins, falling items)
     private Set<String> ignoredTypes = new HashSet<>(Set.of("item", "experience_orb")); // never boxed
     private boolean debugEntities = false;   // brief text above the hotbar listing moving entity types
     private boolean showEquipment = false;   // armor / held items are always fully opaque
@@ -166,8 +172,8 @@ public class ThirdPersonHandsClient implements ClientModInitializer {
             ghost = null;
         }
 
-        // --- predicted projectile boxes ---
-        if (enabled && showProjectiles) {
+        // --- predicted projectile boxes / danger zones ---
+        if (enabled && (showProjectiles || showZones)) {
             updateProjectiles(mc, me, partial, now, Math.max(0, delay));
         } else {
             tracks.clear();
@@ -195,6 +201,7 @@ public class ThirdPersonHandsClient implements ClientModInitializer {
         AABB myBox = me.getBoundingBox();
         Map<String, int[]> counts = debugEntities ? new TreeMap<>() : null;
         int drawn = 0;
+        List<double[]> projs = new ArrayList<>();
         Vec3 myVel = myVelocity(now);
 
         for (Entity e : mc.level.entitiesForRendering()) {
@@ -244,17 +251,21 @@ public class ThirdPersonHandsClient implements ClientModInitializer {
 
             if (counts != null) counts.computeIfAbsent(type, k -> new int[1])[0]++;
             if (!projectileTypes.isEmpty() && !projectileTypes.contains(type)) continue;
-            if (drawn >= 300) continue;
+            projs.add(new double[] { pos.x, pos.y, pos.z, vel.x, vel.y, vel.z });
 
-            Vec3 pred = pos.add(vel.scale(delayMs / 1000.0));
-            double h = projectileBoxSize / 2.0;
-            AABB pb = new AABB(pred.x - h, pred.y - h, pred.z - h, pred.x + h, pred.y + h, pred.z + h);
-            boolean danger = pb.intersects(myBox);
-            Gizmos.cuboid(pb, GizmoStyle.stroke(danger ? 0xFFFF2020 : 0xFFFFC030));
-            drawn++;
+            if (showProjectiles && drawn < 300) {
+                Vec3 pred = pos.add(vel.scale(delayMs / 1000.0));
+                double h = projectileBoxSize / 2.0;
+                AABB pb = new AABB(pred.x - h, pred.y - h, pred.z - h, pred.x + h, pred.y + h, pred.z + h);
+                boolean danger = pb.intersects(myBox);
+                Gizmos.cuboid(pb, GizmoStyle.stroke(danger ? 0xFFFF2020 : 0xFFFFC030));
+                drawn++;
+            }
         }
 
         tracks.keySet().retainAll(seen);
+
+        if (showZones) drawZones(myPos, projs, delayMs);
 
         if (counts != null && now - lastDebug > 5000) {
             lastDebug = now;
@@ -266,6 +277,59 @@ public class ThirdPersonHandsClient implements ClientModInitializer {
             }
             // Shown briefly above the hotbar, never added to chat.
             mc.gui.setOverlayMessage(Component.literal(sb.toString().trim()), false);
+        }
+    }
+
+    /**
+     * Draws a grid of squares on the floor around you. A square is "unsafe" if
+     * you standing on it would be hit by any predicted projectile within the
+     * look-ahead window, starting one delay (about your ping) from now.
+     * It assumes straight-line projectile paths and a flat floor at your feet.
+     */
+    private void drawZones(Vec3 myPos, List<double[]> projs, long delayMs) {
+        double cell = 0.5;
+        int n = (int) Math.ceil(zoneRadius / cell);
+        int size = 2 * n + 1;
+        boolean[][] unsafe = new boolean[size][size];
+
+        double hw = 0.3 + projectileBoxSize / 2.0;   // player half-width + projectile half-size
+        double halfH = projectileBoxSize / 2.0;
+        double feetY = myPos.y;
+        int steps = Math.max(1, zoneLookaheadMs / 50 + 1);
+
+        // Snap the grid to the cell size so the squares don't shimmer as you move.
+        double cx = Math.floor(myPos.x / cell) * cell + cell / 2;
+        double cz = Math.floor(myPos.z / cell) * cell + cell / 2;
+
+        for (double[] p : projs) {
+            for (int k = 0; k < steps; k++) {
+                double t = (delayMs + k * 50L) / 1000.0;
+                double px = p[0] + p[3] * t;
+                double py = p[1] + p[4] * t;
+                double pz = p[2] + p[5] * t;
+                if (py + halfH < feetY || py - halfH > feetY + 1.8) continue;
+
+                int i0 = Math.max(0, (int) Math.ceil((px - hw - cx) / cell) + n);
+                int i1 = Math.min(size - 1, (int) Math.floor((px + hw - cx) / cell) + n);
+                int j0 = Math.max(0, (int) Math.ceil((pz - hw - cz) / cell) + n);
+                int j1 = Math.min(size - 1, (int) Math.floor((pz + hw - cz) / cell) + n);
+                for (int i = i0; i <= i1; i++) {
+                    for (int j = j0; j <= j1; j++) unsafe[i][j] = true;
+                }
+            }
+        }
+
+        double half = cell / 2 * 0.9;
+        for (int i = 0; i < size; i++) {
+            for (int j = 0; j < size; j++) {
+                if (!unsafe[i][j] && !showSafeCells) continue;
+                double x = cx + (i - n) * cell;
+                double z = cz + (j - n) * cell;
+                // Only draw squares inside the circle, so the area is round.
+                if (Math.hypot(x - myPos.x, z - myPos.z) > zoneRadius) continue;
+                AABB sq = new AABB(x - half, feetY + 0.02, z - half, x + half, feetY + 0.04, z + half);
+                Gizmos.cuboid(sq, GizmoStyle.stroke(unsafe[i][j] ? 0xFFFF3030 : 0xFF30E060));
+            }
         }
     }
 
@@ -431,6 +495,8 @@ public class ThirdPersonHandsClient implements ClientModInitializer {
             toggle(left, y0 + row * 5, "Projectile boxes", () -> m.showProjectiles, v -> m.showProjectiles = v);
             toggle(left, y0 + row * 6, "Straight only", () -> m.straightOnly, v -> m.straightOnly = v);
             toggle(left, y0 + row * 7, "Entity debug", () -> m.debugEntities, v -> m.debugEntities = v);
+            toggle(left, y0 + row * 8, "Danger zones", () -> m.showZones, v -> m.showZones = v);
+            toggle(left, y0 + row * 9, "Show safe cells", () -> m.showSafeCells, v -> m.showSafeCells = v);
 
             // Right column: numbers
             stepper(right, y0 + row * 0, "Extra delay", " ms", 5, -200, 400, 0,
@@ -442,8 +508,13 @@ public class ThirdPersonHandsClient implements ClientModInitializer {
             stepper(right, y0 + row * 3, "Hide near", "", 0.25, 0.0, 5.0, 2,
                 () -> m.hideNearDistance, v -> m.hideNearDistance = v);
 
+            stepper(right, y0 + row * 4, "Zone radius", "", 1.0, 2.0, 12.0, 0,
+                () -> m.zoneRadius, v -> m.zoneRadius = v);
+            stepper(right, y0 + row * 5, "Look ahead", " ms", 50, 0, 600, 0,
+                () -> m.zoneLookaheadMs, v -> m.zoneLookaheadMs = (int) Math.round(v));
+
             // Right column: text fields
-            int ty = y0 + row * 4;
+            int ty = y0 + row * 6;
             addRenderableWidget(new StringWidget(right, ty, colW, 9, Component.literal("Outline colour (hex)"), this.font));
             EditBox colorBox = new EditBox(this.font, right, ty + 10, colW, 20, Component.literal("Outline colour"));
             colorBox.setMaxLength(6);
@@ -552,6 +623,10 @@ public class ThirdPersonHandsClient implements ClientModInitializer {
             d.setProperty("projectileBoxSize", String.valueOf(projectileBoxSize));
             d.setProperty("minProjectileSpeed", String.valueOf(minProjectileSpeed));
             d.setProperty("projectileTypes", String.join(",", projectileTypes));
+            d.setProperty("showZones", String.valueOf(showZones));
+            d.setProperty("showSafeCells", String.valueOf(showSafeCells));
+            d.setProperty("zoneRadius", String.valueOf(zoneRadius));
+            d.setProperty("zoneLookaheadMs", String.valueOf(zoneLookaheadMs));
             d.setProperty("straightOnly", String.valueOf(straightOnly));
             d.setProperty("ignoredTypes", String.join(",", ignoredTypes));
             d.setProperty("debugEntities", String.valueOf(debugEntities));
@@ -590,6 +665,10 @@ public class ThirdPersonHandsClient implements ClientModInitializer {
             projectileBoxSize = Double.parseDouble(p.getProperty("projectileBoxSize", "0.5").trim());
             minProjectileSpeed = Double.parseDouble(p.getProperty("minProjectileSpeed", "1.0").trim());
             debugEntities = Boolean.parseBoolean(p.getProperty("debugEntities", "false").trim());
+            showZones = Boolean.parseBoolean(p.getProperty("showZones", "false").trim());
+            showSafeCells = Boolean.parseBoolean(p.getProperty("showSafeCells", "false").trim());
+            zoneRadius = Double.parseDouble(p.getProperty("zoneRadius", "5.0").trim());
+            zoneLookaheadMs = Integer.parseInt(p.getProperty("zoneLookaheadMs", "200").trim());
             straightOnly = Boolean.parseBoolean(p.getProperty("straightOnly", "true").trim());
             Set<String> ignored = new HashSet<>();
             for (String t : p.getProperty("ignoredTypes", "item,experience_orb").split(",")) {
@@ -611,6 +690,4 @@ public class ThirdPersonHandsClient implements ClientModInitializer {
             // keep previous values if the file is unreadable or malformed
         }
     }
-
 }
-
