@@ -6,7 +6,12 @@ import java.io.OutputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayDeque;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Map;
 import java.util.Properties;
+import java.util.Set;
+import java.util.TreeMap;
 import java.util.UUID;
 
 import com.mojang.authlib.GameProfile;
@@ -18,6 +23,8 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.client.multiplayer.PlayerInfo;
 import net.minecraft.client.player.RemotePlayer;
+import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.network.chat.Component;
 import net.minecraft.gizmos.GizmoStyle;
 import net.minecraft.gizmos.Gizmos;
 import net.minecraft.util.Mth;
@@ -39,6 +46,10 @@ import net.minecraft.world.phys.Vec3;
 public class ThirdPersonHandsClient implements ClientModInitializer {
 
     private record Sample(long timeMs, Vec3 pos, float bodyYaw, float headYaw, float pitch) {}
+    private record Pt(long timeMs, Vec3 pos) {}
+
+    private final Map<Integer, ArrayDeque<Pt>> tracks = new HashMap<>();
+    private long lastDebug = 0;
 
     private static final int GHOST_ID = -424242;
 
@@ -49,6 +60,13 @@ public class ThirdPersonHandsClient implements ClientModInitializer {
     private boolean enabled = true;
     private boolean showModel = true;
     private boolean showBox = false;
+    private boolean ghostOutline = true;     // coloured outline so the ghost is easy to see
+    private int ghostOutlineRgb = 0x40C0FF;  // outline colour, RGB
+    private boolean showProjectiles = true;  // predicted projectile boxes
+    private double projectileBoxSize = 0.5;  // size of each predicted box, in blocks
+    private double minProjectileSpeed = 1.0; // ignore entities slower than this (blocks/second)
+    private Set<String> projectileTypes = new HashSet<>(); // empty = all entity types
+    private boolean debugEntities = false;   // chat summary of moving entity types every 5 s
     private boolean showEquipment = false;   // armor / held items are always fully opaque
     private double hideNearDistance = 1.0;   // first person: hide ghost within this many blocks (0 = never hide)
     private int extraDelayMs = 0;     // added on top of your ping
@@ -104,6 +122,8 @@ public class ThirdPersonHandsClient implements ClientModInitializer {
             }
             ghost.place(s);
             ghost.copyLookFrom(me, showEquipment);
+            ghost.glow = ghostOutline;
+            ghost.outlineRgb = ghostOutlineRgb;
             // In first person, hide the ghost while it is close enough that the
             // camera would end up inside its head.
             boolean firstPerson = mc.options.getCameraType().isFirstPerson();
@@ -114,6 +134,13 @@ public class ThirdPersonHandsClient implements ClientModInitializer {
             ghost = null;
         }
 
+        // --- predicted projectile boxes ---
+        if (enabled && showProjectiles) {
+            updateProjectiles(mc, me, partial, now, Math.max(0, delay));
+        } else {
+            tracks.clear();
+        }
+
         // --- optional box ---
         if (enabled && showBox && s != null) {
             Vec3 p = s.pos();
@@ -121,6 +148,69 @@ public class ThirdPersonHandsClient implements ClientModInitializer {
             double h = 1.8 * sizeScale;
             AABB box = new AABB(p.x - w / 2, p.y, p.z - w / 2, p.x + w / 2, p.y + h, p.z + w / 2);
             Gizmos.cuboid(box, GizmoStyle.stroke(color));
+        }
+    }
+
+    /**
+     * Tracks every nearby moving entity, works out its speed, and draws where it
+     * will be one delay (about your ping) from now. That is roughly where the
+     * server will have it when it learns where you are standing right now.
+     * Boxes turn red when they would overlap your real hitbox.
+     */
+    private void updateProjectiles(Minecraft mc, Player me, float partial, long now, long delayMs) {
+        Set<Integer> seen = new HashSet<>();
+        Vec3 myPos = me.getPosition(partial);
+        AABB myBox = me.getBoundingBox();
+        Map<String, int[]> counts = debugEntities ? new TreeMap<>() : null;
+        int drawn = 0;
+
+        for (Entity e : mc.level.entitiesForRendering()) {
+            if (e == me || e == ghost || e instanceof Player) continue;
+            Vec3 pos = e.getPosition(partial);
+            if (pos.distanceToSqr(myPos) > 40 * 40) continue;
+
+            int id = e.getId();
+            seen.add(id);
+            ArrayDeque<Pt> tr = tracks.computeIfAbsent(id, k -> new ArrayDeque<>());
+            tr.addLast(new Pt(now, pos));
+            while (tr.size() > 2 && tr.peekFirst().timeMs() < now - 400) tr.removeFirst();
+
+            // Speed from the newest sample that is at least 100 ms old.
+            Pt old = null;
+            for (Pt p : tr) {
+                if (now - p.timeMs() >= 100) old = p; else break;
+            }
+            if (old == null) continue;
+
+            double dt = (now - old.timeMs()) / 1000.0;
+            Vec3 vel = pos.subtract(old.pos()).scale(1.0 / dt);
+            double speed = vel.length();
+            if (speed < minProjectileSpeed || speed > 120) continue;
+
+            String type = BuiltInRegistries.ENTITY_TYPE.getKey(e.getType()).getPath();
+            if (counts != null) counts.computeIfAbsent(type, k -> new int[1])[0]++;
+            if (!projectileTypes.isEmpty() && !projectileTypes.contains(type)) continue;
+            if (drawn >= 300) continue;
+
+            Vec3 pred = pos.add(vel.scale(delayMs / 1000.0));
+            double h = projectileBoxSize / 2.0;
+            AABB pb = new AABB(pred.x - h, pred.y - h, pred.z - h, pred.x + h, pred.y + h, pred.z + h);
+            boolean danger = pb.intersects(myBox);
+            Gizmos.cuboid(pb, GizmoStyle.stroke(danger ? 0xFFFF2020 : 0xFFFFC030));
+            drawn++;
+        }
+
+        tracks.keySet().retainAll(seen);
+
+        if (counts != null && now - lastDebug > 5000) {
+            lastDebug = now;
+            StringBuilder sb = new StringBuilder("[Ghost debug] moving entities near you: ");
+            if (counts.isEmpty()) {
+                sb.append("none");
+            } else {
+                counts.forEach((k, v) -> sb.append(k).append(" x").append(v[0]).append("  "));
+            }
+            me.displayClientMessage(Component.literal(sb.toString().trim()), false);
         }
     }
 
@@ -160,6 +250,8 @@ public class ThirdPersonHandsClient implements ClientModInitializer {
         private double lastTickX, lastTickZ;
         private boolean hasLastTick = false;
         boolean hidden = false;
+        boolean glow = true;
+        int outlineRgb = 0x40C0FF;
 
         GhostPlayer(ClientLevel level) {
             super(level, new GameProfile(UUID.randomUUID(), "ghost"));
@@ -189,6 +281,16 @@ public class ThirdPersonHandsClient implements ClientModInitializer {
                 // left off by default to keep the ghost clearly see-through.
                 this.setItemSlot(slot, copyEquipment ? me.getItemBySlot(slot).copy() : ItemStack.EMPTY);
             }
+        }
+
+        @Override
+        public boolean isCurrentlyGlowing() {
+            return glow; // vanilla draws a coloured outline around glowing entities
+        }
+
+        @Override
+        public int getTeamColor() {
+            return outlineRgb; // sets the outline colour
         }
 
         @Override
@@ -237,6 +339,13 @@ public class ThirdPersonHandsClient implements ClientModInitializer {
                 d.setProperty("showModel", "true");
                 d.setProperty("showBox", "false");
                 d.setProperty("showEquipment", "false");
+                d.setProperty("ghostOutline", "true");
+                d.setProperty("ghostOutlineColorHex", "40C0FF");
+                d.setProperty("showProjectiles", "true");
+                d.setProperty("projectileBoxSize", "0.5");
+                d.setProperty("minProjectileSpeed", "1.0");
+                d.setProperty("projectileTypes", "");
+                d.setProperty("debugEntities", "false");
                 d.setProperty("hideNearDistance", "1.0");
                 d.setProperty("extraDelayMs", "0");
                 d.setProperty("fixedDelayMs", "-1");
@@ -255,6 +364,18 @@ public class ThirdPersonHandsClient implements ClientModInitializer {
             showModel = Boolean.parseBoolean(p.getProperty("showModel", "true").trim());
             showBox = Boolean.parseBoolean(p.getProperty("showBox", "false").trim());
             showEquipment = Boolean.parseBoolean(p.getProperty("showEquipment", "false").trim());
+            ghostOutline = Boolean.parseBoolean(p.getProperty("ghostOutline", "true").trim());
+            ghostOutlineRgb = (int) (Long.parseLong(p.getProperty("ghostOutlineColorHex", "40C0FF").trim(), 16) & 0xFFFFFF);
+            showProjectiles = Boolean.parseBoolean(p.getProperty("showProjectiles", "true").trim());
+            projectileBoxSize = Double.parseDouble(p.getProperty("projectileBoxSize", "0.5").trim());
+            minProjectileSpeed = Double.parseDouble(p.getProperty("minProjectileSpeed", "1.0").trim());
+            debugEntities = Boolean.parseBoolean(p.getProperty("debugEntities", "false").trim());
+            Set<String> types = new HashSet<>();
+            for (String t : p.getProperty("projectileTypes", "").split(",")) {
+                String s = t.trim().toLowerCase();
+                if (!s.isEmpty()) types.add(s);
+            }
+            projectileTypes = types;
             hideNearDistance = Double.parseDouble(p.getProperty("hideNearDistance", "1.0").trim());
             extraDelayMs = Integer.parseInt(p.getProperty("extraDelayMs", "0").trim());
             fixedDelayMs = Integer.parseInt(p.getProperty("fixedDelayMs", "-1").trim());
