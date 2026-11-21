@@ -611,7 +611,6 @@ public class ThirdPersonHandsClient implements ClientModInitializer {
             // keep previous values if the file is unreadable or malformed
         }
     }
-}
 
 }
 
