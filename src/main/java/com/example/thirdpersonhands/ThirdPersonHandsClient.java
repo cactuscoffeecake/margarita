@@ -419,7 +419,8 @@ public class ThirdPersonHandsClient implements ClientModInitializer {
             int y0 = 36;
             int row = 24;
 
-            addRenderableWidget(new StringWidget(0, 14, this.width, 9, this.title, this.font).alignCenter());
+            int titleW = this.font.width(this.title);
+            addRenderableWidget(new StringWidget((this.width - titleW) / 2, 14, titleW, 9, this.title, this.font));
 
             // Left column: on/off switches
             toggle(left, y0 + row * 0, "Ghost", () -> m.enabled, v -> m.enabled = v);
@@ -610,5 +611,7 @@ public class ThirdPersonHandsClient implements ClientModInitializer {
             // keep previous values if the file is unreadable or malformed
         }
     }
+}
+
 }
 
