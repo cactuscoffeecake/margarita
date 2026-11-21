@@ -210,7 +210,8 @@ public class ThirdPersonHandsClient implements ClientModInitializer {
             } else {
                 counts.forEach((k, v) -> sb.append(k).append(" x").append(v[0]).append("  "));
             }
-            me.displayClientMessage(Component.literal(sb.toString().trim()), false);
+            // Shown briefly above the hotbar, never added to chat.
+            mc.gui.setOverlayMessage(Component.literal(sb.toString().trim()), false);
         }
     }
 
