@@ -25,6 +25,7 @@ import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.entity.player.PlayerSkin;
+import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
 
@@ -48,6 +49,8 @@ public class ThirdPersonHandsClient implements ClientModInitializer {
     private boolean enabled = true;
     private boolean showModel = true;
     private boolean showBox = false;
+    private boolean showEquipment = false;   // armor / held items are always fully opaque
+    private double hideNearDistance = 1.0;   // first person: hide ghost within this many blocks (0 = never hide)
     private int extraDelayMs = 0;     // added on top of your ping
     private int fixedDelayMs = -1;    // if >= 0, ignore ping and use this
     private double sizeScale = 1.0;   // box size only (1.0 = normal player size)
@@ -100,7 +103,12 @@ public class ThirdPersonHandsClient implements ClientModInitializer {
                 mc.level.addEntity(ghost);
             }
             ghost.place(s);
-            ghost.copyLookFrom(me);
+            ghost.copyLookFrom(me, showEquipment);
+            // In first person, hide the ghost while it is close enough that the
+            // camera would end up inside its head.
+            boolean firstPerson = mc.options.getCameraType().isFirstPerson();
+            ghost.hidden = firstPerson && hideNearDistance > 0
+                && s.pos().distanceTo(me.getPosition(partial)) < hideNearDistance;
         } else if (ghost != null) {
             mc.level.removeEntity(GHOST_ID, Entity.RemovalReason.DISCARDED);
             ghost = null;
@@ -151,6 +159,7 @@ public class ThirdPersonHandsClient implements ClientModInitializer {
     private static class GhostPlayer extends RemotePlayer {
         private double lastTickX, lastTickZ;
         private boolean hasLastTick = false;
+        boolean hidden = false;
 
         GhostPlayer(ClientLevel level) {
             super(level, new GameProfile(UUID.randomUUID(), "ghost"));
@@ -173,11 +182,18 @@ public class ThirdPersonHandsClient implements ClientModInitializer {
             this.xRotO = s.pitch();
         }
 
-        void copyLookFrom(Player me) {
+        void copyLookFrom(Player me, boolean copyEquipment) {
             this.setPose(me.getPose());
             for (EquipmentSlot slot : EquipmentSlot.values()) {
-                this.setItemSlot(slot, me.getItemBySlot(slot).copy());
+                // Armor and held items can't be faded by vanilla, so they are
+                // left off by default to keep the ghost clearly see-through.
+                this.setItemSlot(slot, copyEquipment ? me.getItemBySlot(slot).copy() : ItemStack.EMPTY);
             }
+        }
+
+        @Override
+        public boolean shouldRender(double camX, double camY, double camZ) {
+            return !hidden && super.shouldRender(camX, camY, camZ);
         }
 
         @Override
@@ -220,6 +236,8 @@ public class ThirdPersonHandsClient implements ClientModInitializer {
                 d.setProperty("enabled", "true");
                 d.setProperty("showModel", "true");
                 d.setProperty("showBox", "false");
+                d.setProperty("showEquipment", "false");
+                d.setProperty("hideNearDistance", "1.0");
                 d.setProperty("extraDelayMs", "0");
                 d.setProperty("fixedDelayMs", "-1");
                 d.setProperty("sizeScale", "1.0");
@@ -236,6 +254,8 @@ public class ThirdPersonHandsClient implements ClientModInitializer {
             enabled = Boolean.parseBoolean(p.getProperty("enabled", "true").trim());
             showModel = Boolean.parseBoolean(p.getProperty("showModel", "true").trim());
             showBox = Boolean.parseBoolean(p.getProperty("showBox", "false").trim());
+            showEquipment = Boolean.parseBoolean(p.getProperty("showEquipment", "false").trim());
+            hideNearDistance = Double.parseDouble(p.getProperty("hideNearDistance", "1.0").trim());
             extraDelayMs = Integer.parseInt(p.getProperty("extraDelayMs", "0").trim());
             fixedDelayMs = Integer.parseInt(p.getProperty("fixedDelayMs", "-1").trim());
             sizeScale = Double.parseDouble(p.getProperty("sizeScale", "1.0").trim());
