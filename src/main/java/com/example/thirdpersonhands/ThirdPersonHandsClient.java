@@ -7,36 +7,51 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayDeque;
 import java.util.Properties;
+import java.util.UUID;
+
+import com.mojang.authlib.GameProfile;
 
 import net.fabricmc.api.ClientModInitializer;
-import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
+import net.fabricmc.fabric.api.client.rendering.v1.level.LevelRenderEvents;
 import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.client.Minecraft;
+import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.client.multiplayer.PlayerInfo;
+import net.minecraft.client.player.RemotePlayer;
 import net.minecraft.gizmos.GizmoStyle;
 import net.minecraft.gizmos.Gizmos;
+import net.minecraft.util.Mth;
+import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.EquipmentSlot;
+import net.minecraft.world.entity.player.Player;
+import net.minecraft.world.entity.player.PlayerSkin;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
 
 /**
- * Stage 1: draws a "ghost" hitbox at the position you were at roughly one
- * ping ago, which is where the server compares projectiles against you.
+ * Draws a faded copy of your player at the position you were at roughly one
+ * ping ago (where the server compares projectiles against you).
  *
  * Settings live in config/thirdperson_hands.properties and are re-read every
  * couple of seconds, so you can edit them while the game is running.
  */
 public class ThirdPersonHandsClient implements ClientModInitializer {
 
-    private record Sample(long timeMs, Vec3 pos) {}
+    private record Sample(long timeMs, Vec3 pos, float bodyYaw, float headYaw, float pitch) {}
+
+    private static final int GHOST_ID = -424242;
 
     private final ArrayDeque<Sample> history = new ArrayDeque<>();
+    private GhostPlayer ghost;
 
     // Settings (defaults; overwritten from the config file)
     private boolean enabled = true;
+    private boolean showModel = true;
+    private boolean showBox = false;
     private int extraDelayMs = 0;     // added on top of your ping
     private int fixedDelayMs = -1;    // if >= 0, ignore ping and use this
-    private double sizeScale = 1.0;   // 1.0 = normal player size
-    private int color = 0xFFFF3030;   // ARGB
+    private double sizeScale = 1.0;   // box size only (1.0 = normal player size)
+    private int color = 0xFFFF3030;   // box colour, ARGB
 
     private long lastConfigRead = 0;
     private final Path configPath =
@@ -45,10 +60,11 @@ public class ThirdPersonHandsClient implements ClientModInitializer {
     @Override
     public void onInitializeClient() {
         readConfig();
-        ClientTickEvents.END_CLIENT_TICK.register(this::onTick);
+        // Runs once per rendered frame, so everything is smooth.
+        LevelRenderEvents.END_EXTRACTION.register(context -> onFrame(Minecraft.getInstance()));
     }
 
-    private void onTick(Minecraft mc) {
+    private void onFrame(Minecraft mc) {
         long now = System.currentTimeMillis();
         if (now - lastConfigRead > 2000) {
             readConfig();
@@ -57,24 +73,47 @@ public class ThirdPersonHandsClient implements ClientModInitializer {
 
         if (mc.player == null || mc.level == null) {
             history.clear();
+            ghost = null;
             return;
         }
 
-        history.addLast(new Sample(now, mc.player.position()));
+        float partial = mc.getDeltaTracker().getGameTimeDeltaPartialTick(false);
+        Player me = mc.player;
+        history.addLast(new Sample(
+            now,
+            me.getPosition(partial),
+            Mth.rotLerp(partial, me.yBodyRotO, me.yBodyRot),
+            Mth.rotLerp(partial, me.yHeadRotO, me.yHeadRot),
+            me.getViewXRot(partial)));
         while (history.size() > 2 && history.peekFirst().timeMs() < now - 2000) {
             history.removeFirst();
         }
 
-        if (!enabled) return;
-
         long delay = fixedDelayMs >= 0 ? fixedDelayMs : currentPing(mc) + extraDelayMs;
-        Vec3 p = positionAt(now - Math.max(0, delay));
-        if (p == null) return;
+        Sample s = sampleAt(now - Math.max(0, delay));
 
-        double w = 0.6 * sizeScale;
-        double h = 1.8 * sizeScale;
-        AABB box = new AABB(p.x - w / 2, p.y, p.z - w / 2, p.x + w / 2, p.y + h, p.z + w / 2);
-        Gizmos.cuboid(box, GizmoStyle.stroke(color));
+        // --- faded player model ---
+        if (enabled && showModel && s != null) {
+            if (ghost == null || ghost.level() != mc.level) {
+                ghost = new GhostPlayer(mc.level);
+                ghost.setId(GHOST_ID);
+                mc.level.addEntity(ghost);
+            }
+            ghost.place(s);
+            ghost.copyLookFrom(me);
+        } else if (ghost != null) {
+            mc.level.removeEntity(GHOST_ID, Entity.RemovalReason.DISCARDED);
+            ghost = null;
+        }
+
+        // --- optional box ---
+        if (enabled && showBox && s != null) {
+            Vec3 p = s.pos();
+            double w = 0.6 * sizeScale;
+            double h = 1.8 * sizeScale;
+            AABB box = new AABB(p.x - w / 2, p.y, p.z - w / 2, p.x + w / 2, p.y + h, p.z + w / 2);
+            Gizmos.cuboid(box, GizmoStyle.stroke(color));
+        }
     }
 
     private int currentPing(Minecraft mc) {
@@ -83,19 +122,95 @@ public class ThirdPersonHandsClient implements ClientModInitializer {
         return info == null ? 0 : info.getLatency();
     }
 
-    /** Interpolated position of the player at the given wall-clock time. */
-    private Vec3 positionAt(long targetMs) {
+    /** Interpolated state of the player at the given wall-clock time. */
+    private Sample sampleAt(long targetMs) {
         Sample prev = null;
         for (Sample s : history) {
             if (s.timeMs() >= targetMs) {
-                if (prev == null) return s.pos();
+                if (prev == null) return s;
                 long span = s.timeMs() - prev.timeMs();
-                double t = span <= 0 ? 1.0 : (double) (targetMs - prev.timeMs()) / span;
-                return prev.pos().lerp(s.pos(), t);
+                float t = span <= 0 ? 1.0f : (float) (targetMs - prev.timeMs()) / span;
+                return new Sample(
+                    targetMs,
+                    prev.pos().lerp(s.pos(), t),
+                    Mth.rotLerp(t, prev.bodyYaw(), s.bodyYaw()),
+                    Mth.rotLerp(t, prev.headYaw(), s.headYaw()),
+                    Mth.lerp(t, prev.pitch(), s.pitch()));
             }
             prev = s;
         }
-        return prev == null ? null : prev.pos();
+        return prev;
+    }
+
+    /**
+     * A client-only copy of the player. Vanilla draws invisible entities that
+     * you are allowed to see as faded/translucent, so we mark it invisible but
+     * visible-to-you. It can't be clicked, has no nametag, and never touches
+     * the server.
+     */
+    private static class GhostPlayer extends RemotePlayer {
+        private double lastTickX, lastTickZ;
+        private boolean hasLastTick = false;
+
+        GhostPlayer(ClientLevel level) {
+            super(level, new GameProfile(UUID.randomUUID(), "ghost"));
+            this.noPhysics = true;
+            this.setInvisible(true);
+        }
+
+        void place(Sample s) {
+            // Setting old == new position turns off vanilla's 20 Hz smoothing,
+            // so the ghost follows the per-frame positions exactly.
+            this.setPos(s.pos().x, s.pos().y, s.pos().z);
+            this.xo = this.xOld = s.pos().x;
+            this.yo = this.yOld = s.pos().y;
+            this.zo = this.zOld = s.pos().z;
+            this.yBodyRot = this.yBodyRotO = s.bodyYaw();
+            this.yHeadRot = this.yHeadRotO = s.headYaw();
+            this.setYRot(s.bodyYaw());
+            this.yRotO = s.bodyYaw();
+            this.setXRot(s.pitch());
+            this.xRotO = s.pitch();
+        }
+
+        void copyLookFrom(Player me) {
+            this.setPose(me.getPose());
+            for (EquipmentSlot slot : EquipmentSlot.values()) {
+                this.setItemSlot(slot, me.getItemBySlot(slot).copy());
+            }
+        }
+
+        @Override
+        public void tick() {
+            // Drive the walking animation from how far the ghost moved this tick.
+            if (hasLastTick) {
+                this.updateWalkAnimation((float) Math.hypot(getX() - lastTickX, getZ() - lastTickZ));
+            }
+            lastTickX = getX();
+            lastTickZ = getZ();
+            hasLastTick = true;
+        }
+
+        @Override
+        public boolean isInvisibleTo(Player player) {
+            return false; // lets vanilla draw it faded instead of hiding it
+        }
+
+        @Override
+        public boolean isPickable() {
+            return false; // clicks and attacks pass straight through
+        }
+
+        @Override
+        public boolean shouldShowName() {
+            return false;
+        }
+
+        @Override
+        public PlayerSkin getSkin() {
+            Minecraft mc = Minecraft.getInstance();
+            return mc.player != null ? mc.player.getSkin() : super.getSkin();
+        }
     }
 
     private void readConfig() {
@@ -103,12 +218,14 @@ public class ThirdPersonHandsClient implements ClientModInitializer {
             if (!Files.exists(configPath)) {
                 Properties d = new Properties();
                 d.setProperty("enabled", "true");
+                d.setProperty("showModel", "true");
+                d.setProperty("showBox", "false");
                 d.setProperty("extraDelayMs", "0");
                 d.setProperty("fixedDelayMs", "-1");
                 d.setProperty("sizeScale", "1.0");
                 d.setProperty("colorHex", "FFFF3030");
                 try (OutputStream out = Files.newOutputStream(configPath)) {
-                    d.store(out, "Third Person Hands - ghost hitbox. fixedDelayMs=-1 means use your ping.");
+                    d.store(out, "Third Person Hands - ghost. fixedDelayMs=-1 means use your ping.");
                 }
                 return;
             }
@@ -117,6 +234,8 @@ public class ThirdPersonHandsClient implements ClientModInitializer {
                 p.load(in);
             }
             enabled = Boolean.parseBoolean(p.getProperty("enabled", "true").trim());
+            showModel = Boolean.parseBoolean(p.getProperty("showModel", "true").trim());
+            showBox = Boolean.parseBoolean(p.getProperty("showBox", "false").trim());
             extraDelayMs = Integer.parseInt(p.getProperty("extraDelayMs", "0").trim());
             fixedDelayMs = Integer.parseInt(p.getProperty("fixedDelayMs", "-1").trim());
             sizeScale = Double.parseDouble(p.getProperty("sizeScale", "1.0").trim());
