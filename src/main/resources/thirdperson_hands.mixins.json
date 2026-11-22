@@ -4,7 +4,10 @@
   "package": "com.example.thirdpersonhands.mixin",
   "compatibilityLevel": "JAVA_25",
   "client": [
-    "GameRendererMixin"
+    "GameRendererMixin",
+    "EntityRenderDispatcherMixin",
+    "EntityMixin",
+    "LivingEntityMixin"
   ],
   "injectors": {
     "defaultRequire": 1
