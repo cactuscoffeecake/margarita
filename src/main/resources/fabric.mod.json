@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "thirdperson_hands",
   "version": "${version}",
-  "name": "Third Person Hands",
+  "name": "Margarita",
   "description": "Keeps your first-person hands and held items visible while in third person.",
   "authors": ["you"],
   "license": "MIT",
