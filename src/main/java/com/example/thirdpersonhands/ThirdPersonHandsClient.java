@@ -141,12 +141,9 @@ public class ThirdPersonHandsClient implements ClientModInitializer {
             KeyMapping.Category.register(Identifier.fromNamespaceAndPath("thirdperson_hands", "main"))));
 
         ClientTickEvents.END_CLIENT_TICK.register(this::onTick);
-        // Once per rendered frame. This MUST run at the START of extraction: the game copies every
-        // entity's position into its render state during extraction, so moving the stand-in after
-        // that makes it lag one frame behind the camera (that was the flicker).
-        LevelRenderEvents.START_EXTRACTION.register(context -> onFrame(Minecraft.getInstance()));
-        // Debug gizmos are drawn at the end instead.
-        LevelRenderEvents.END_EXTRACTION.register(context -> drawPendingBox());
+        // Once per rendered frame (ghost, flags, debug box). The mob model's position is NOT set
+        // here: it is copied from your player every tick, so it moves exactly like your player does.
+        LevelRenderEvents.END_EXTRACTION.register(context -> onFrame(Minecraft.getInstance()));
     }
 
     // ------------------------------------------------------------------
@@ -165,22 +162,9 @@ public class ThirdPersonHandsClient implements ClientModInitializer {
             return;
         }
 
-        // Drive the mob's walking animation from how far you moved this tick.
-        if (hasLastTick) {
-            d.xo = lastTickX;
-            d.yo = lastTickY;
-            d.zo = lastTickZ;
-        } else {
-            d.xo = me.getX();
-            d.yo = me.getY();
-            d.zo = me.getZ();
-        }
-        d.setPos(me.getX(), me.getY(), me.getZ());
-        d.calculateEntityAnimation(false);
-        lastTickX = me.getX();
-        lastTickY = me.getY();
-        lastTickZ = me.getZ();
-        hasLastTick = true;
+        // Copy your player's tick positions and rotations. The game then interpolates the stand-in
+        // between ticks exactly like it does your player, so it can't flicker or lag the camera.
+        syncToPlayer(d, (EntityType<?>) d.getType(), me);
 
         keepSwimming(d);
 
@@ -228,6 +212,8 @@ public class ThirdPersonHandsClient implements ClientModInitializer {
         // The ender dragon renderer ignores the scale attribute, so a mixin shrinks it using this.
         EntityType<?> t = mobEnabled ? resolveType(mobId) : null;
         ModState.dragonScale = t == EntityType.ENDER_DRAGON ? (float) (0.25 * mobScale) : 1.0f;
+
+        drawPendingBox();
     }
 
     private void drawPendingBox() {
@@ -250,7 +236,34 @@ public class ThirdPersonHandsClient implements ClientModInitializer {
         return AQUATIC.contains(p) || FLYING.contains(p);
     }
 
-    /** Positions and rotates a stand-in mob (the model or the ghost) exactly, with no 20 Hz smoothing. */
+    /** Makes the stand-in mirror your player's tick-to-tick movement and rotation. */
+    private void syncToPlayer(LivingEntity d, EntityType<?> type, Player me) {
+        double hover = isFloaty(type) ? hoverHeight : 0.0;
+        // The ender dragon's model faces the opposite way to every other mob.
+        float off = type == EntityType.ENDER_DRAGON ? 180.0f : 0.0f;
+
+        // Walk animation: how far you moved this tick.
+        d.setPos(me.getX(), me.getY() + hover, me.getZ());
+        d.xo = me.xo;
+        d.zo = me.zo;
+        d.calculateEntityAnimation(false);
+
+        // Interpolation anchors = your player's, so the render position matches your camera.
+        d.xo = d.xOld = me.xo;
+        d.yo = d.yOld = me.yo + hover;
+        d.zo = d.zOld = me.zo;
+        d.yBodyRotO = me.yBodyRotO + off;
+        d.yBodyRot = me.yBodyRot + off;
+        d.yHeadRotO = me.yHeadRotO + off;
+        d.yHeadRot = me.yHeadRot + off;
+        d.yRotO = me.yBodyRotO + off;
+        d.setYRot(me.yBodyRot + off);
+        d.xRotO = me.xRotO;
+        d.setXRot(me.getXRot());
+        d.setDeltaMovement(Vec3.ZERO);
+    }
+
+    /** Positions and rotates the ghost mob exactly, with no 20 Hz smoothing. */
     private void poseMob(LivingEntity d, EntityType<?> type, Vec3 p, float body, float head, float pitch) {
         double y = p.y + (isFloaty(type) ? hoverHeight : 0.0);
         // The ender dragon's model faces the opposite way to every other mob.
@@ -533,6 +546,10 @@ public class ThirdPersonHandsClient implements ClientModInitializer {
         lastGhostX = g.getX();
         lastGhostY = g.getY();
         lastGhostZ = g.getZ();
+        // Back to "no smoothing", so this tick's animation trick can't skew the next frame.
+        g.xo = g.xOld = lastGhostX;
+        g.yo = g.yOld = lastGhostY;
+        g.zo = g.zOld = lastGhostZ;
         hasLastGhost = true;
 
         for (EquipmentSlot slot : EquipmentSlot.values()) {
@@ -579,18 +596,11 @@ public class ThirdPersonHandsClient implements ClientModInitializer {
             dummyBaby = baby;
             hasLastTick = false;
             ModState.dummy = le;
+            syncToPlayer(le, type, me);
         }
 
         LivingEntity d = (LivingEntity) dummy;
         if (appliedScale != mobScale) applyScale(d);
-
-        Vec3 p = me.getPosition(partial);
-        float body = Mth.rotLerp(partial, me.yBodyRotO, me.yBodyRot);
-        float head = Mth.rotLerp(partial, me.yHeadRotO, me.yHeadRot);
-        float pitch = me.getViewXRot(partial);
-
-        // Old == new turns off vanilla's 20 Hz smoothing, so it follows frame-exact positions.
-        poseMob(d, type, p, body, head, pitch);
 
         d.setPose(me.isCrouching() ? Pose.CROUCHING : Pose.STANDING);
         // Swimmers and flyers are lifted off the ground and treated as airborne / in water.
