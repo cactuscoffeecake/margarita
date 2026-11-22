@@ -60,7 +60,7 @@ import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
 
 /**
- * Third Person Hands. Three independent features, one menu (press K):
+ * Margarita. Three independent features, one menu (press K):
  *
  *  1. Hands in third person: your first-person hands and held items stay on
  *     screen in F5 (done by GameRendererMixin).
@@ -99,7 +99,8 @@ public class ThirdPersonHandsClient implements ClientModInitializer {
     private double hideNearDistance = 1.0;   // first person: hide ghost within this many blocks (0 = never hide)
     private int extraDelayMs = 0;            // added on top of your ping
     private int fixedDelayMs = -1;           // if >= 0, ignore ping and use this
-    private boolean ghostAsMob = false;      // ghost looks like your chosen mob (outline only) instead of a player
+    private boolean ghostAsMob = false;      // ghost looks like your chosen mob instead of a player
+    private boolean mobGhostFirstPerson = false; // show the mob ghost while in first person
 
     // ---- mob model state and settings ----
     private Entity dummy;
@@ -511,7 +512,8 @@ public class ThirdPersonHandsClient implements ClientModInitializer {
         boolean firstPerson = mc.options.getCameraType().isFirstPerson();
         boolean hide = firstPerson && hideNearDistance > 0
             && p.distanceTo(me.getPosition(partial)) < hideNearDistance;
-        g.setGlowingTag(ghostOutline && !hide);
+        ModState.ghostGlow = ghostOutline && !hide;
+        ModState.hideGhostMob = firstPerson && !mobGhostFirstPerson;
         ModState.ghostOutlineRgb = ghostOutlineRgb;
     }
 
@@ -523,6 +525,8 @@ public class ThirdPersonHandsClient implements ClientModInitializer {
         ghostMobType = null;
         ModState.ghostMob = null;
         ModState.ghostAquatic = false;
+        ModState.ghostGlow = false;
+        ModState.hideGhostMob = false;
     }
 
     /** Per tick: animate the ghost mob's legs and sync its gear. */
@@ -683,7 +687,7 @@ public class ThirdPersonHandsClient implements ClientModInitializer {
         private final ThirdPersonHandsClient m;
 
         MainScreen(ThirdPersonHandsClient m) {
-            super(Component.literal("Third Person Hands"));
+            super(Component.literal("Margarita"));
             this.m = m;
         }
 
@@ -759,6 +763,8 @@ public class ThirdPersonHandsClient implements ClientModInitializer {
                 b.setMessage(shapeText());
             }).bounds(left, y0 + row * 5, 150, 20).build());
 
+            toggle(right, y0 + row * 5, "Mob ghost in 1st", () -> m.mobGhostFirstPerson, v -> m.mobGhostFirstPerson = v);
+
             // Right column: numbers
             stepper(right, y0 + row * 0, "Extra delay", " ms", 5, -200, 400, 0,
                 () -> m.extraDelayMs, v -> m.extraDelayMs = (int) Math.round(v));
@@ -783,7 +789,7 @@ public class ThirdPersonHandsClient implements ClientModInitializer {
             });
             addRenderableWidget(colorBox);
 
-            String note = "Fixed -1 = real ping.  Mob shape = outline only, needs a mob picked.";
+            String note = "Fixed -1 = real ping.  Mob shape needs a mob picked.";
             int nw = this.font.width(note);
             addRenderableWidget(new StringWidget((this.width - nw) / 2, this.height - 44, nw, 9,
                 Component.literal(note), this.font));
@@ -1010,6 +1016,7 @@ public class ThirdPersonHandsClient implements ClientModInitializer {
             p.setProperty("extraDelayMs", String.valueOf(extraDelayMs));
             p.setProperty("fixedDelayMs", String.valueOf(fixedDelayMs));
             p.setProperty("ghostAsMob", String.valueOf(ghostAsMob));
+            p.setProperty("mobGhostFirstPerson", String.valueOf(mobGhostFirstPerson));
             p.setProperty("mobEnabled", String.valueOf(mobEnabled));
             p.setProperty("mob", mobId);
             p.setProperty("baby", String.valueOf(baby));
@@ -1017,7 +1024,7 @@ public class ThirdPersonHandsClient implements ClientModInitializer {
             p.setProperty("mobScale", String.valueOf(mobScale));
             p.setProperty("hoverHeight", String.valueOf(hoverHeight));
             try (OutputStream out = Files.newOutputStream(configPath)) {
-                p.store(out, "Third Person Hands. enabled = ping ghost. fixedDelayMs=-1 means use your ping.");
+                p.store(out, "Margarita. enabled = ping ghost. fixedDelayMs=-1 means use your ping.");
             }
             // Don't immediately re-read the file we just wrote.
             lastConfigRead = System.currentTimeMillis();
@@ -1047,6 +1054,7 @@ public class ThirdPersonHandsClient implements ClientModInitializer {
             extraDelayMs = Integer.parseInt(p.getProperty("extraDelayMs", "0").trim());
             fixedDelayMs = Integer.parseInt(p.getProperty("fixedDelayMs", "-1").trim());
             ghostAsMob = Boolean.parseBoolean(p.getProperty("ghostAsMob", "false").trim());
+            mobGhostFirstPerson = Boolean.parseBoolean(p.getProperty("mobGhostFirstPerson", "false").trim());
             mobEnabled = Boolean.parseBoolean(p.getProperty("mobEnabled", "false").trim());
             String mob = p.getProperty("mob", "minecraft:zombie").trim().toLowerCase();
             mobId = mob.contains(":") ? mob : "minecraft:" + mob;

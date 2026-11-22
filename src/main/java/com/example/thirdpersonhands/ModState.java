@@ -22,6 +22,10 @@ public final class ModState {
     public static volatile boolean ghostAquatic = false;
     /** Extra scale for the ender dragon renderer (it ignores the scale attribute). */
     public static volatile float dragonScale = 1.0f;
+    /** Whether the ghost mob should currently glow (the client ignores setGlowingTag, so a mixin reads this). */
+    public static volatile boolean ghostGlow = false;
+    /** True while the ghost mob must not be drawn at all (first person, if the player turned that off). */
+    public static volatile boolean hideGhostMob = false;
     /** Outline colour (RGB) for the ghost mob. */
     public static volatile int ghostOutlineRgb = 0x40C0FF;
 }
