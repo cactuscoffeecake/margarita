@@ -15,6 +15,13 @@ public final class ModState {
     public static volatile Object dummy = null;
     /** The outline-only ghost mob entity (ghost shape = mob), or null. */
     public static volatile Object ghostMob = null;
+    /** True while the stand-in must be skipped by the renderer (first person). */
+    public static volatile boolean hideDummy = false;
+    /** The stand-in / ghost mob is a swimmer: report "in water" so fish don't lie flat. */
+    public static volatile boolean dummyAquatic = false;
+    public static volatile boolean ghostAquatic = false;
+    /** Extra scale for the ender dragon renderer (it ignores the scale attribute). */
+    public static volatile float dragonScale = 1.0f;
     /** Outline colour (RGB) for the ghost mob. */
     public static volatile int ghostOutlineRgb = 0x40C0FF;
 }

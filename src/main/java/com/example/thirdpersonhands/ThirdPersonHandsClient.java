@@ -10,6 +10,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Properties;
+import java.util.Set;
 import java.util.UUID;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
@@ -113,6 +114,16 @@ public class ThirdPersonHandsClient implements ClientModInitializer {
     private boolean baby = false;
     private boolean mobCopyGear = false;
     private double mobScale = 1.0;
+    private double hoverHeight = 1.25;       // blocks that swimming / flying mobs float above the ground
+    private AABB pendingBox;                 // hitbox gizmo, drawn at END_EXTRACTION
+
+    // Mobs that should look like they are swimming / flying: they get lifted off the ground.
+    private static final Set<String> AQUATIC = Set.of(
+        "cod", "salmon", "pufferfish", "tropical_fish", "squid", "glow_squid", "dolphin",
+        "guardian", "elder_guardian", "axolotl", "tadpole", "turtle", "nautilus", "zombie_nautilus");
+    private static final Set<String> FLYING = Set.of(
+        "bat", "bee", "parrot", "phantom", "allay", "vex", "blaze", "ghast", "happy_ghast",
+        "ender_dragon", "wither");
 
     private long lastConfigRead = 0;
     private KeyMapping openKey;
@@ -130,8 +141,12 @@ public class ThirdPersonHandsClient implements ClientModInitializer {
             KeyMapping.Category.register(Identifier.fromNamespaceAndPath("thirdperson_hands", "main"))));
 
         ClientTickEvents.END_CLIENT_TICK.register(this::onTick);
-        // Once per rendered frame, so everything is smooth.
-        LevelRenderEvents.END_EXTRACTION.register(context -> onFrame(Minecraft.getInstance()));
+        // Once per rendered frame. This MUST run at the START of extraction: the game copies every
+        // entity's position into its render state during extraction, so moving the stand-in after
+        // that makes it lag one frame behind the camera (that was the flicker).
+        LevelRenderEvents.START_EXTRACTION.register(context -> onFrame(Minecraft.getInstance()));
+        // Debug gizmos are drawn at the end instead.
+        LevelRenderEvents.END_EXTRACTION.register(context -> drawPendingBox());
     }
 
     // ------------------------------------------------------------------
@@ -167,6 +182,8 @@ public class ThirdPersonHandsClient implements ClientModInitializer {
         lastTickZ = me.getZ();
         hasLastTick = true;
 
+        keepSwimming(d);
+
         for (EquipmentSlot slot : EquipmentSlot.values()) {
             ItemStack want = mobCopyGear ? me.getItemBySlot(slot).copy() : ItemStack.EMPTY;
             if (!ItemStack.matches(d.getItemBySlot(slot), want)) {
@@ -198,12 +215,73 @@ public class ThirdPersonHandsClient implements ClientModInitializer {
             dummyType = null;
             ModState.dummy = null;
             ModState.hidePlayer = false;
+            ModState.hideDummy = false;
+            ModState.dragonScale = 1.0f;
+            pendingBox = null;
             return;
         }
 
         float partial = mc.getDeltaTracker().getGameTimeDeltaPartialTick(false);
         updateGhost(mc, level, me, partial, now);
         updateMob(mc, level, me, partial);
+
+        // The ender dragon renderer ignores the scale attribute, so a mixin shrinks it using this.
+        EntityType<?> t = mobEnabled ? resolveType(mobId) : null;
+        ModState.dragonScale = t == EntityType.ENDER_DRAGON ? (float) (0.25 * mobScale) : 1.0f;
+    }
+
+    private void drawPendingBox() {
+        if (pendingBox != null) Gizmos.cuboid(pendingBox, GizmoStyle.stroke(0xFFFF3030));
+    }
+
+    // ---------------- per-type helpers ----------------
+
+    private static String pathOf(EntityType<?> t) {
+        Identifier key = BuiltInRegistries.ENTITY_TYPE.getKey(t);
+        return key == null ? "" : key.getPath();
+    }
+
+    private static boolean isAquatic(EntityType<?> t) {
+        return AQUATIC.contains(pathOf(t));
+    }
+
+    private static boolean isFloaty(EntityType<?> t) {
+        String p = pathOf(t);
+        return AQUATIC.contains(p) || FLYING.contains(p);
+    }
+
+    /** Positions and rotates a stand-in mob (the model or the ghost) exactly, with no 20 Hz smoothing. */
+    private void poseMob(LivingEntity d, EntityType<?> type, Vec3 p, float body, float head, float pitch) {
+        double y = p.y + (isFloaty(type) ? hoverHeight : 0.0);
+        // The ender dragon's model faces the opposite way to every other mob.
+        float off = type == EntityType.ENDER_DRAGON ? 180.0f : 0.0f;
+        float b = body + off;
+        float h = head + off;
+
+        d.setPos(p.x, y, p.z);
+        d.xo = d.xOld = p.x;
+        d.yo = d.yOld = y;
+        d.zo = d.zOld = p.z;
+        d.yBodyRot = d.yBodyRotO = b;
+        d.yHeadRot = d.yHeadRotO = h;
+        d.setYRot(b);
+        d.yRotO = b;
+        d.setXRot(pitch);
+        d.xRotO = pitch;
+        d.setDeltaMovement(Vec3.ZERO);
+    }
+
+    /**
+     * A squid's tentacles only animate while a counter runs, and on the client the counter freezes
+     * until the server sends event 19. There is no server here, so restart it ourselves.
+     */
+    private static void keepSwimming(LivingEntity e) {
+        try {
+            java.lang.reflect.Field f = e.getClass().getField("tentacleMovement");
+            if (f.getFloat(e) >= 3.14f) e.handleEntityEvent((byte) 19);
+        } catch (ReflectiveOperationException | RuntimeException ignored) {
+            // not a squid
+        }
     }
 
     // ---------------- ping ghost ----------------
@@ -254,8 +332,9 @@ public class ThirdPersonHandsClient implements ClientModInitializer {
 
         if (ghostEnabled && showBox && s != null) {
             Vec3 p = s.pos();
-            AABB box = new AABB(p.x - 0.3, p.y, p.z - 0.3, p.x + 0.3, p.y + 1.8, p.z + 0.3);
-            Gizmos.cuboid(box, GizmoStyle.stroke(0xFFFF3030));
+            pendingBox = new AABB(p.x - 0.3, p.y, p.z - 0.3, p.x + 0.3, p.y + 1.8, p.z + 0.3);
+        } else {
+            pendingBox = null;
         }
     }
 
@@ -396,6 +475,7 @@ public class ThirdPersonHandsClient implements ClientModInitializer {
             le.setNoGravity(true);
             le.noPhysics = true;
             le.setInvisible(true);
+            ModState.ghostAquatic = isAquatic(type);
             if (le instanceof Mob mob) mob.setBaby(baby);
             level.addEntity(le);
             ghostMob = le;
@@ -410,25 +490,15 @@ public class ThirdPersonHandsClient implements ClientModInitializer {
         if (inst != null && inst.getBaseValue() != mobScale) inst.setBaseValue(mobScale);
 
         Vec3 p = s.pos();
-        g.setPos(p.x, p.y, p.z);
-        g.xo = g.xOld = p.x;
-        g.yo = g.yOld = p.y;
-        g.zo = g.zOld = p.z;
-        g.yBodyRot = g.yBodyRotO = s.bodyYaw();
-        g.yHeadRot = g.yHeadRotO = s.headYaw();
-        g.setYRot(s.bodyYaw());
-        g.yRotO = s.bodyYaw();
-        g.setXRot(s.pitch());
-        g.xRotO = s.pitch();
-        g.setDeltaMovement(Vec3.ZERO);
+        poseMob(g, type, p, s.bodyYaw(), s.headYaw(), s.pitch());
         g.setPose(me.isCrouching() ? Pose.CROUCHING : Pose.STANDING);
-        g.setOnGround(me.onGround());
+        g.setOnGround(me.onGround() && !isFloaty(type));
 
         // First person: switch the outline off while the ghost is close enough to surround the camera.
         boolean firstPerson = mc.options.getCameraType().isFirstPerson();
         boolean hide = firstPerson && hideNearDistance > 0
             && p.distanceTo(me.getPosition(partial)) < hideNearDistance;
-        g.setGlowingTag(!hide);
+        g.setGlowingTag(ghostOutline && !hide);
         ModState.ghostOutlineRgb = ghostOutlineRgb;
     }
 
@@ -439,6 +509,7 @@ public class ThirdPersonHandsClient implements ClientModInitializer {
         ghostMob = null;
         ghostMobType = null;
         ModState.ghostMob = null;
+        ModState.ghostAquatic = false;
     }
 
     /** Per tick: animate the ghost mob's legs and sync its gear. */
@@ -458,6 +529,7 @@ public class ThirdPersonHandsClient implements ClientModInitializer {
             g.zo = g.getZ();
         }
         g.calculateEntityAnimation(false);
+        keepSwimming(g);
         lastGhostX = g.getX();
         lastGhostY = g.getY();
         lastGhostZ = g.getZ();
@@ -498,6 +570,7 @@ public class ThirdPersonHandsClient implements ClientModInitializer {
             le.setId(DUMMY_ID);
             le.setNoGravity(true);
             le.noPhysics = true;
+            ModState.dummyAquatic = isAquatic(type);
             if (le instanceof Mob mob) mob.setBaby(baby);
             applyScale(le);
             level.addEntity(le);
@@ -517,20 +590,11 @@ public class ThirdPersonHandsClient implements ClientModInitializer {
         float pitch = me.getViewXRot(partial);
 
         // Old == new turns off vanilla's 20 Hz smoothing, so it follows frame-exact positions.
-        d.setPos(p.x, p.y, p.z);
-        d.xo = d.xOld = p.x;
-        d.yo = d.yOld = p.y;
-        d.zo = d.zOld = p.z;
-        d.yBodyRot = d.yBodyRotO = body;
-        d.yHeadRot = d.yHeadRotO = head;
-        d.setYRot(body);
-        d.yRotO = body;
-        d.setXRot(pitch);
-        d.xRotO = pitch;
-        d.setDeltaMovement(Vec3.ZERO);
+        poseMob(d, type, p, body, head, pitch);
 
         d.setPose(me.isCrouching() ? Pose.CROUCHING : Pose.STANDING);
-        d.setOnGround(me.onGround());
+        // Swimmers and flyers are lifted off the ground and treated as airborne / in water.
+        d.setOnGround(me.onGround() && !isFloaty(type));
         d.setSprinting(me.isSprinting());
 
         // Copy your arm swing so attacks animate.
@@ -540,7 +604,9 @@ public class ThirdPersonHandsClient implements ClientModInitializer {
         d.oAttackAnim = me.oAttackAnim;
 
         // First person: hide the stand-in so the camera isn't inside it.
-        d.setInvisible(mc.options.getCameraType().isFirstPerson());
+        boolean firstPerson = mc.options.getCameraType().isFirstPerson();
+        d.setInvisible(firstPerson);
+        ModState.hideDummy = firstPerson; // some renderers (ender dragon) ignore invisibility
 
         ModState.hidePlayer = true;
     }
@@ -559,6 +625,8 @@ public class ThirdPersonHandsClient implements ClientModInitializer {
         dummyType = null;
         ModState.dummy = null;
         ModState.hidePlayer = false;
+        ModState.hideDummy = false;
+        ModState.dummyAquatic = false;
     }
 
     private static EntityType<?> resolveType(String id) {
@@ -937,6 +1005,7 @@ public class ThirdPersonHandsClient implements ClientModInitializer {
             p.setProperty("baby", String.valueOf(baby));
             p.setProperty("mobCopyGear", String.valueOf(mobCopyGear));
             p.setProperty("mobScale", String.valueOf(mobScale));
+            p.setProperty("hoverHeight", String.valueOf(hoverHeight));
             try (OutputStream out = Files.newOutputStream(configPath)) {
                 p.store(out, "Third Person Hands. enabled = ping ghost. fixedDelayMs=-1 means use your ping.");
             }
@@ -974,6 +1043,7 @@ public class ThirdPersonHandsClient implements ClientModInitializer {
             baby = Boolean.parseBoolean(p.getProperty("baby", "false").trim());
             mobCopyGear = Boolean.parseBoolean(p.getProperty("mobCopyGear", "false").trim());
             mobScale = Mth.clamp(Double.parseDouble(p.getProperty("mobScale", "1.0").trim()), 0.25, 4.0);
+            hoverHeight = Mth.clamp(Double.parseDouble(p.getProperty("hoverHeight", "1.25").trim()), 0.0, 5.0);
         } catch (IOException | NumberFormatException ignored) {
             // keep previous values if the file is unreadable or malformed
         }
