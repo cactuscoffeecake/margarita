@@ -27,6 +27,8 @@ public class EntityRenderDispatcherMixin {
             cir.setReturnValue(false);
         } else if (ModState.hideDummy && entity == ModState.dummy) {
             cir.setReturnValue(false);
+        } else if (ModState.hideGhostMob && entity == ModState.ghostMob) {
+            cir.setReturnValue(false);
         }
     }
 }

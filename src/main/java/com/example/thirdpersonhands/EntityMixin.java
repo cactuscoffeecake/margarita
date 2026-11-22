@@ -46,6 +46,15 @@ public class EntityMixin {
     }
 
     /**
+     * On the client, setGlowingTag() does nothing (the game re-reads the same flag it just wrote),
+     * which is why the ghost mob never glowed. Answer the question directly instead.
+     */
+    @Inject(method = "isCurrentlyGlowing", at = @At("HEAD"), cancellable = true, require = 0)
+    private void thirdpersonhands$ghostGlow(CallbackInfoReturnable<Boolean> cir) {
+        if ((Object) this == ModState.ghostMob) cir.setReturnValue(ModState.ghostGlow);
+    }
+
+    /**
      * Makes the ghost mob render faded (like the player ghost) instead of outline-only,
      * which for many mobs ended up showing nothing at all.
      */

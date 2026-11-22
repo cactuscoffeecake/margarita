@@ -18,6 +18,11 @@ public class LivingEntityMixin {
         if ((Object) this == ModState.dummy || (Object) this == ModState.ghostMob) cir.setReturnValue(false);
     }
 
+    @Inject(method = "isCurrentlyGlowing", at = @At("HEAD"), cancellable = true, require = 0)
+    private void thirdpersonhands$ghostGlow(CallbackInfoReturnable<Boolean> cir) {
+        if ((Object) this == ModState.ghostMob) cir.setReturnValue(ModState.ghostGlow);
+    }
+
     @Inject(method = "isPushable", at = @At("HEAD"), cancellable = true, require = 0)
     private void thirdpersonhands$notPushable(CallbackInfoReturnable<Boolean> cir) {
         if ((Object) this == ModState.dummy || (Object) this == ModState.ghostMob) cir.setReturnValue(false);
