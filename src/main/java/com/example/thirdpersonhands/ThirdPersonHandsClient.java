@@ -44,6 +44,7 @@ import net.minecraft.gizmos.Gizmos;
 import net.minecraft.network.chat.Component;
 import net.minecraft.resources.Identifier;
 import net.minecraft.util.Mth;
+import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EntitySpawnReason;
 import net.minecraft.world.entity.EntityType;
@@ -128,6 +129,14 @@ public class ThirdPersonHandsClient implements ClientModInitializer {
 
     private long lastConfigRead = 0;
     private KeyMapping openKey;
+    private KeyMapping armorKey;
+
+    // Armor swap: right-clicks hotbar slots in order, one per few game ticks, then returns to a slot.
+    private int[] armorSlots = {6, 7, 8, 9};   // hotbar slots 1-9, 0 = skip
+    private int armorDelayTicks = 2;           // game ticks per piece (20 ticks = 1 second)
+    private int armorReturnSlot = 1;           // 0 = stay on the last slot
+    private int armorStep = -1;                // -1 = not running
+    private int armorWait = 0;
     private final Path configPath =
         FabricLoader.getInstance().getConfigDir().resolve("thirdperson_hands.properties");
 
@@ -135,11 +144,18 @@ public class ThirdPersonHandsClient implements ClientModInitializer {
     public void onInitializeClient() {
         readConfig();
 
+        KeyMapping.Category category =
+            KeyMapping.Category.register(Identifier.fromNamespaceAndPath("thirdperson_hands", "main"));
         openKey = KeyMappingHelper.registerKeyMapping(new KeyMapping(
             "key.thirdperson_hands.open_settings",
             InputConstants.Type.KEYSYM,
             GLFW.GLFW_KEY_K,
-            KeyMapping.Category.register(Identifier.fromNamespaceAndPath("thirdperson_hands", "main"))));
+            category));
+        armorKey = KeyMappingHelper.registerKeyMapping(new KeyMapping(
+            "key.thirdperson_hands.armor_swap",
+            InputConstants.Type.KEYSYM,
+            GLFW.GLFW_KEY_UNKNOWN,   // unbound: set it in Controls (a mouse button works too)
+            category));
 
         ClientTickEvents.END_CLIENT_TICK.register(this::onTick);
         // Once per rendered frame (ghost, flags, debug box). The mob model's position is NOT set
@@ -155,6 +171,14 @@ public class ThirdPersonHandsClient implements ClientModInitializer {
         while (openKey.consumeClick()) {
             if (mc.screen == null) mc.setScreen(new MainScreen(this));
         }
+
+        while (armorKey.consumeClick()) {
+            if (armorStep < 0 && mc.player != null && mc.gameMode != null && mc.screen == null) {
+                armorStep = 0;
+                armorWait = 0;
+            }
+        }
+        if (armorStep >= 0) tickArmorSwap(mc);
 
         Player me = mc.player;
         tickGhostMob(mc, me);
@@ -678,6 +702,36 @@ public class ThirdPersonHandsClient implements ClientModInitializer {
         saveConfig();
     }
 
+    /**
+     * One step per game tick: select the next hotbar slot and right-click it (equips the armor in it),
+     * wait, repeat, then go back to the return slot. Running on game ticks means the server sees clean,
+     * evenly spaced actions, unlike an outside macro that can fall between ticks.
+     */
+    private void tickArmorSwap(Minecraft mc) {
+        Player p = mc.player;
+        if (p == null || mc.gameMode == null || mc.screen != null) {
+            armorStep = -1;   // cancel if you leave the world or open a menu
+            return;
+        }
+        if (armorWait > 0) {
+            armorWait--;
+            return;
+        }
+        while (armorStep < armorSlots.length && armorSlots[armorStep] < 1) armorStep++;
+
+        if (armorStep < armorSlots.length) {
+            p.getInventory().setSelectedSlot(armorSlots[armorStep] - 1);
+            mc.gameMode.useItem(p, InteractionHand.MAIN_HAND);
+            armorStep++;
+            armorWait = Math.max(0, armorDelayTicks - 1);
+        } else {
+            if (armorReturnSlot >= 1 && armorReturnSlot <= 9) {
+                p.getInventory().setSelectedSlot(armorReturnSlot - 1);
+            }
+            armorStep = -1;
+        }
+    }
+
     // ------------------------------------------------------------------
     // Screens
     // ------------------------------------------------------------------
@@ -714,8 +768,12 @@ public class ThirdPersonHandsClient implements ClientModInitializer {
                 b -> Minecraft.getInstance().setScreen(new MobScreen(m, this)))
                 .bounds(x, y + 52, w, 20).build());
 
+            addRenderableWidget(Button.builder(Component.literal("Armor swap..."),
+                b -> Minecraft.getInstance().setScreen(new ArmorScreen(m, this)))
+                .bounds(x, y + 78, w, 20).build());
+
             addRenderableWidget(Button.builder(Component.literal("Done"), b -> this.onClose())
-                .bounds(x, y + 84, w, 20).build());
+                .bounds(x, y + 110, w, 20).build());
         }
 
         private static Component handsText() {
@@ -834,6 +892,81 @@ public class ThirdPersonHandsClient implements ClientModInitializer {
                 set.accept(Math.min(max, get.getAsDouble() + step));
                 m.saveConfig();
                 display.setMessage(numText(label, unit, get.getAsDouble(), decimals));
+            }).bounds(x + 130, y, 20, 20).build();
+
+            addRenderableWidget(minus);
+            addRenderableWidget(display);
+            addRenderableWidget(plus);
+        }
+    }
+
+    /** Armor swap settings. The key itself is set in Controls. */
+    private static class ArmorScreen extends Screen {
+        private final ThirdPersonHandsClient m;
+        private final Screen parent;
+
+        ArmorScreen(ThirdPersonHandsClient m, Screen parent) {
+            super(Component.literal("Armor swap"));
+            this.m = m;
+            this.parent = parent;
+        }
+
+        @Override
+        protected void init() {
+            int x = (this.width - 150) / 2;
+            int y = 50;
+            int row = 24;
+
+            int titleW = this.font.width(this.title);
+            addRenderableWidget(new StringWidget((this.width - titleW) / 2, 20, titleW, 9, this.title, this.font));
+
+            for (int i = 0; i < 4; i++) {
+                final int idx = i;
+                stepper(x, y + row * i, "Piece " + (i + 1) + " slot", "", 1, 0, 9,
+                    () -> m.armorSlots[idx], v -> m.armorSlots[idx] = (int) v);
+            }
+            stepper(x, y + row * 4, "Ticks per piece", "", 1, 1, 10,
+                () -> m.armorDelayTicks, v -> m.armorDelayTicks = (int) v);
+            stepper(x, y + row * 5, "Return to slot", "", 1, 0, 9,
+                () -> m.armorReturnSlot, v -> m.armorReturnSlot = (int) v);
+
+            int noteY = y + row * 6 + 4;
+            String note = "Slot 0 = skip. 20 ticks = 1 second. Return 0 = stay.";
+            addRenderableWidget(new StringWidget((this.width - this.font.width(note)) / 2, noteY,
+                this.font.width(note), 9, Component.literal(note), this.font));
+            String note2 = "Set the key in Controls > Margarita.";
+            addRenderableWidget(new StringWidget((this.width - this.font.width(note2)) / 2, noteY + 12,
+                this.font.width(note2), 9, Component.literal(note2), this.font));
+
+            addRenderableWidget(Button.builder(Component.literal("Done"), b -> this.onClose())
+                .bounds((this.width - 150) / 2, noteY + 32, 150, 20).build());
+        }
+
+        @Override
+        public void onClose() {
+            Minecraft.getInstance().setScreen(parent);
+        }
+
+        private static Component numText(String label, String unit, double v) {
+            return Component.literal(label + ": " + (int) v + unit);
+        }
+
+        private void stepper(int x, int y, String label, String unit, double step, double min, double max,
+                             DoubleSupplier get, DoubleConsumer set) {
+            Button display = Button.builder(numText(label, unit, get.getAsDouble()), b -> {})
+                .bounds(x + 22, y, 106, 20).build();
+            display.active = false;
+
+            Button minus = Button.builder(Component.literal("-"), b -> {
+                set.accept(Math.max(min, get.getAsDouble() - step));
+                m.saveConfig();
+                display.setMessage(numText(label, unit, get.getAsDouble()));
+            }).bounds(x, y, 20, 20).build();
+
+            Button plus = Button.builder(Component.literal("+"), b -> {
+                set.accept(Math.min(max, get.getAsDouble() + step));
+                m.saveConfig();
+                display.setMessage(numText(label, unit, get.getAsDouble()));
             }).bounds(x + 130, y, 20, 20).build();
 
             addRenderableWidget(minus);
@@ -1023,6 +1156,9 @@ public class ThirdPersonHandsClient implements ClientModInitializer {
             p.setProperty("mobCopyGear", String.valueOf(mobCopyGear));
             p.setProperty("mobScale", String.valueOf(mobScale));
             p.setProperty("hoverHeight", String.valueOf(hoverHeight));
+            p.setProperty("armorSlots", armorSlots[0] + "," + armorSlots[1] + "," + armorSlots[2] + "," + armorSlots[3]);
+            p.setProperty("armorDelayTicks", String.valueOf(armorDelayTicks));
+            p.setProperty("armorReturnSlot", String.valueOf(armorReturnSlot));
             try (OutputStream out = Files.newOutputStream(configPath)) {
                 p.store(out, "Margarita. enabled = ping ghost. fixedDelayMs=-1 means use your ping.");
             }
@@ -1062,6 +1198,14 @@ public class ThirdPersonHandsClient implements ClientModInitializer {
             mobCopyGear = Boolean.parseBoolean(p.getProperty("mobCopyGear", "false").trim());
             mobScale = Mth.clamp(Double.parseDouble(p.getProperty("mobScale", "1.0").trim()), 0.25, 4.0);
             hoverHeight = Mth.clamp(Double.parseDouble(p.getProperty("hoverHeight", "1.25").trim()), 0.0, 5.0);
+            String[] parts = p.getProperty("armorSlots", "6,7,8,9").split(",");
+            int[] slots = new int[4];
+            for (int i = 0; i < 4; i++) {
+                slots[i] = i < parts.length ? Mth.clamp(Integer.parseInt(parts[i].trim()), 0, 9) : 0;
+            }
+            armorSlots = slots;
+            armorDelayTicks = Mth.clamp(Integer.parseInt(p.getProperty("armorDelayTicks", "2").trim()), 1, 10);
+            armorReturnSlot = Mth.clamp(Integer.parseInt(p.getProperty("armorReturnSlot", "1").trim()), 0, 9);
         } catch (IOException | NumberFormatException ignored) {
             // keep previous values if the file is unreadable or malformed
         }
