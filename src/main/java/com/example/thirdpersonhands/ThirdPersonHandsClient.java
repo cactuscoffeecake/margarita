@@ -722,6 +722,8 @@ public class ThirdPersonHandsClient implements ClientModInitializer {
         if (armorStep < armorSlots.length) {
             p.getInventory().setSelectedSlot(armorSlots[armorStep] - 1);
             mc.gameMode.useItem(p, InteractionHand.MAIN_HAND);
+            // useItem() doesn't swing the arm by itself (the game's normal right-click code does that).
+            p.swing(InteractionHand.MAIN_HAND);
             armorStep++;
             armorWait = Math.max(0, armorDelayTicks - 1);
         } else {
